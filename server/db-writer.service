@@ -1,0 +1,15 @@
+# systemd-Dienst für den db_writer (nur Linux).
+# Zielort: /etc/systemd/system/db-writer.service
+# Danach:  systemctl daemon-reload && systemctl enable --now db-writer
+
+[Unit]
+Description=S7 DB Writer
+After=network-online.target postgresql.service mosquitto.service
+
+[Service]
+ExecStart=/usr/bin/python3 /opt/s7/db_writer.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
