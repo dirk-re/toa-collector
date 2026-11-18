@@ -14,6 +14,7 @@ Netzwerkausfall. Die Anleitung liegt zusätzlich unter `anleitung/ANLEITUNG.md`.
 | `client/s7_publisher.py` | `C:\s7-client\s7_publisher.py` |
 | `client/mosquitto_client.conf` | `C:\Program Files\mosquitto\mosquitto.conf` (ersetzt die Standardkonfiguration) |
 | `server/schema.sql` | DB-Gerät, einmalig mit psql ausführen |
+| `server/aggregations.sql` | DB-Gerät, einmalig mit psql ausführen (nach `schema.sql`) |
 | `server/mosquitto_zentral.conf` | DB-Gerät: Linux `/etc/mosquitto/mosquitto.conf`, Windows `C:\Program Files\mosquitto\mosquitto.conf` |
 | `server/db_writer.py` | DB-Gerät: Linux `/opt/s7/db_writer.py`, Windows `C:\s7\db_writer.py` |
 | `server/db-writer.service` | Nur Linux: `/etc/systemd/system/db-writer.service` |
@@ -187,6 +188,13 @@ psql -d sensordaten -c "CREATE EXTENSION timescaledb;"
 psql -d sensordaten -f schema.sql
 ```
 
+Anschliessend Komprimierung, Langzeit-Aggregate und Aufbewahrung einrichten
+(einmalig, Details in Abschnitt 7):
+
+```bash
+psql -d sensordaten -f aggregations.sql
+```
+
 Datenbankbenutzer `writer` anlegen und Rechte auf die Tabelle erteilen:
 
 ```bash
@@ -240,8 +248,8 @@ AppParameters `C:\s7\db_writer.py`, Dienstname z. B. `S7DbWriter`.
 
 ## 6. Inbetriebnahme in dieser Reihenfolge
 
-1. DB-Gerät: Schema anlegen, zentralen Broker konfigurieren, Benutzer
-   anlegen, db_writer starten.
+1. DB-Gerät: Schema und Aggregate anlegen, zentralen Broker konfigurieren,
+   Benutzer anlegen, db_writer starten.
 2. Ein Client-Gerät vollständig einrichten, Publisher manuell starten.
 3. Kontrolle am DB-Gerät:
    `mosquitto_sub -t "s7/#" -v` zeigt die eintreffenden Nachrichten;
@@ -252,7 +260,45 @@ AppParameters `C:\s7\db_writer.py`, Dienstname z. B. `S7DbWriter`.
 5. Publisher als Dienst installieren und die Schritte 2 bis 4 für die
    übrigen neun Clients wiederholen.
 
-## 7. Mehrere S7-1500 an einem Client-Gerät
+## 7. Langzeit-Aggregation und Aufbewahrung
+
+`aggregations.sql` richtet nach `schema.sql` die Langzeitperspektive ein:
+
+1. Komprimierung: Chunks der Rohdaten werden nach 7 Tagen komprimiert.
+   Die Komprimierungseinstellungen decken den Primärschlüssel
+   `(time, message_id, tag)` ab; deshalb bleibt die Deduplizierung
+   (`INSERT ... ON CONFLICT`) auch für spät nachgelieferte, gepufferte
+   Nachrichten in bereits komprimierten Bereichen erhalten.
+2. Continuous Aggregates: `measurements_1min` (aus den Rohdaten),
+   `measurements_1h` (aus dem Minuten-Aggregat) und `measurements_1day`
+   (aus dem Stunden-Aggregat), jeweils gruppiert nach `site_id`,
+   `device_id`, `channel_id` mit min/max/avg/anzahl je Bucket.
+   Tages- und Stundengrenzen der Buckets liegen in UTC.
+3. Refresh-Policies: der weit gefasste `start_offset` (7 bis 10 Tage)
+   stellt sicher, dass nach einem Netzwerkausfall nachgelieferte,
+   gepufferte Nachrichten in die Aggregate eingerechnet werden.
+4. Aufbewahrung: Rohdaten-Chunks werden nach 5 Jahren gelöscht. Die
+   Aggregate bleiben unberührt; sie liegen in eigenen Tabellen und
+   behalten ihre Werte auch nach dem Löschen der Rohdaten.
+
+Lange Auswertungen laufen gegen die Aggregate, nicht gegen die Rohdaten:
+
+```sql
+-- Tagesauswertung ueber ein Jahr:
+SELECT * FROM measurements_1day
+WHERE bucket >= '2026-01-01' AND bucket < '2027-01-01'
+ORDER BY bucket;
+```
+
+Hinweise:
+
+- Hierarchische Continuous Aggregates erfordern TimescaleDB >= 2.9; das
+  in Abschnitt 5.1 installierte Paket erfüllt das.
+- Die unbegrenzte Erstabfüllung in `aggregations.sql` (Abschnitt 4 der
+  Datei) nur vor dem ersten Löschen durch die Aufbewahrung ausführen;
+  danach nur noch Refreshes mit explizitem Zeitfenster.
+
+## 8. Mehrere S7-1500 an einem Client-Gerät
 
 Ein Client-Gerät kann mehrere Steuerungen bedienen. Pro Steuerung wird eine
 eigene Publisher-Instanz betrieben:
@@ -282,7 +328,7 @@ Der lokale Mosquitto-Broker und die Bridge werden nur einmal pro
 Client-Gerät betrieben; die Pufferung bei Netzwerkausfall gilt gemeinsam
 für alle Instanzen auf dem Gerät.
 
-## 8. Fehlersuche
+## 9. Fehlersuche
 
 | Symptom | Prüfen |
 |---|---|
@@ -293,7 +339,7 @@ für alle Instanzen auf dem Gerät.
 | Tabelle bleibt leer | db_writer-Log, DB_DSN, Rechte des Datenbankbenutzers |
 | Lücken in der Tabelle | `max_queued_messages` groß genug? Persistenzverzeichnis beschreibbar? |
 
-## 9. Hinweise für den Betrieb
+## 10. Hinweise für den Betrieb
 
 - Computer-Uhr der Clients per NTP synchronisieren, da der Zeitstempel beim
   Client erzeugt wird.
