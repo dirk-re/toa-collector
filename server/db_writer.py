@@ -29,7 +29,7 @@ BATCH_SEKUNDEN = 2.0                # oder so vielen Sekunden schreiben
 # ----------------------------------------------------------------------------
 
 INSERT_SQL = """
-    INSERT INTO measurements (time, message_id, tag, sensor_id, value)
+    INSERT INTO measurements (time, message_id, tag, site_id, device_id, channel_id, value)
     VALUES %s
     ON CONFLICT (time, message_id, tag) DO NOTHING
 """
@@ -58,9 +58,10 @@ def flush(client):
         return
     rows = []
     for nachricht, _ in batch:
-        for tag, wert in nachricht["values"].items():
+        for tag, eintrag in nachricht["values"].items():
             rows.append((nachricht["time"], nachricht["message_id"], tag,
-                         nachricht["sensor_id"], wert))
+                         nachricht["site_id"], eintrag["device_id"],
+                         eintrag["channel_id"], eintrag["value"]))
     with conn.cursor() as cur:
         execute_values(cur, INSERT_SQL, rows)
     conn.commit()

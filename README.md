@@ -39,7 +39,8 @@ Pufferungsverhalten:
   `(time, message_id, tag)` in der Datenbank aussortiert.
 
 Jeder Client benötigt eine eindeutige `client_id`, einen eigenen Topic-Präfix
-(`s7/client-01/data` … `s7/client-10/data`) und eine eigene `sensor_id`.
+(`s7/client-01/data` … `s7/client-10/data`), eine eigene `site_id` sowie
+je Tag `device_id` und eine eindeutige `channel_id`.
 
 ## 3. Vorbereitung der S7-1500 im TIA Portal (pro Steuerung einmalig)
 
@@ -84,10 +85,11 @@ mkdir C:\s7-client, C:\s7-client\logs, C:\mosquitto-data
 
 1. `s7_publisher.py` nach `C:\s7-client\` kopieren.
 2. `config.ini` nach `C:\s7-client\` kopieren und anpassen:
-   - `[geraet]`: `client_id`, `sensor_id` (z. B. s7-client-02 / client-02),
+   - `[geraet]`: `client_id`, `site_id` (z. B. s7-client-02),
    - `[plc]`: IP-Adresse der S7-1500,
    - `[mqtt]`: Benutzer, Passwort, Topic-Präfix,
-   - `[tags]`: DB-Nummer, Startbyte, Typ (und Bitnummer bei bool) je Variable.
+   - `[tags]`: Geraete-ID, Kanal-ID, DB-Nummer, Startbyte,
+     Typ (und Bitnummer bei bool) je Variable.
 3. `mosquitto_client.conf` als `C:\Program Files\mosquitto\mosquitto.conf`
    speichern (ersetzt die Standardkonfiguration) und darin `ZENTRAL-IP`
    auf die Adresse des Datenbankgeräts setzen.
@@ -257,7 +259,7 @@ eigene Publisher-Instanz betrieben:
 
 1. Je Steuerung eine eigene `config.ini` anlegen, z. B. `config-presse.ini`
    und `config-drehmaschine.ini`. Darin jeweils eindeutige Werte vergeben:
-   `client_id`, `sensor_id`, `topic` und die PLC-IP. Die Tag-Liste je
+   `client_id`, `site_id`, `topic` und die PLC-IP. Die Tag-Liste je
    Steuerung individuell eintragen.
 2. Pro Instanz einen eigenen Windows-Dienst einrichten (NSSM):
 
@@ -273,8 +275,8 @@ Start-Service S7Publisher-Presse
    (`publisher-{client_id}.log`); die Dateien vermischen sich nicht.
 4. Jede Instanz veröffentlicht unter ihrem eigenen Topic
    (`s7/presse/data`, `s7/drehmaschine/data`). Die Bridge leitet `s7/#`
-   weiter, der db_writer empfängt alles; in der Tabelle unterscheidet die
-   `sensor_id` die Herkunft.
+   weiter, der db_writer empfängt alles; in der Tabelle unterscheiden
+   `site_id`, `device_id` und `channel_id` die Herkunft.
 
 Der lokale Mosquitto-Broker und die Bridge werden nur einmal pro
 Client-Gerät betrieben; die Pufferung bei Netzwerkausfall gilt gemeinsam

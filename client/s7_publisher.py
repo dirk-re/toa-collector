@@ -30,17 +30,32 @@ TYPEN = {
 }
 
 def lade_tags(cfg):
-    """Wandelt den [tags]-Abschnitt der INI in eine Liste von Tag-Definitionen."""
+    """Wandelt den [tags]-Abschnitt der INI in eine Liste von Tag-Definitionen.
+    Zeilenformat: name = Geraete-ID, Kanal-ID, DB-Nummer, Startbyte, Typ, [Bit bei bool]
+    """
     tags = []
+    kanal_ids = set()
     for name, roh in cfg["tags"].items():
         teile = [t.strip() for t in roh.split(",")]
-        db, offset, typ = int(teile[0]), int(teile[1]), teile[2].lower()
+        if len(teile) < 5:
+            raise ValueError(
+                f"Tag '{name}' benoetigt mindestens 5 Eintraege: "
+                "Geraete-ID, Kanal-ID, DB-Nummer, Startbyte, Typ")
+        geraet_id = teile[0]
+        kanal, db, offset, typ = teile[1], int(teile[2]), int(teile[3]), teile[4].lower()
         if typ not in TYPEN:
             raise ValueError(f"Unbekannter Typ '{typ}' bei Tag '{name}'")
-        bit = int(teile[3]) if typ == "bool" else None
+        schluessel = (geraet_id, kanal)
+        if schluessel in kanal_ids:
+            raise ValueError(
+                f"Kombination Geraete-ID '{geraet_id}' / Kanal-ID '{kanal}' "
+                f"bei Tag '{name}' mehrfach vergeben")
+        kanal_ids.add(schluessel)
+        bit = int(teile[5]) if typ == "bool" else None
         if typ == "bool" and bit is None:
             raise ValueError(f"Tag '{name}' (bool) benoetigt eine Bit-Nummer")
-        tags.append(dict(name=name, db=db, offset=offset, typ=typ, bit=bit))
+        tags.append(dict(name=name, device_id=geraet_id, channel_id=kanal,
+                         db=db, offset=offset, typ=typ, bit=bit))
     return tags
 
 def lies_werte(plc, tags):
@@ -64,7 +79,7 @@ def main():
     cfg.read(args.config, encoding="utf-8")
 
     client_id = cfg["geraet"]["client_id"]
-    sensor_id = cfg["geraet"]["sensor_id"]
+    site_id = cfg["geraet"]["site_id"]
     topic = cfg["mqtt"]["topic"]
     zyklus = cfg.getfloat("plc", "zyklus", fallback=1.0)
 
@@ -115,11 +130,19 @@ def main():
             plc_verbinden()
             continue
 
+        # Je Messwert werden die im [tags]-Abschnitt konfigurierte
+        # Geraete-ID und Kanal-ID mitgeschickt; die site_id stammt aus [geraet].
+        werte_pro_tag = {
+            tag["name"]: {"device_id": tag["device_id"],
+                          "channel_id": tag["channel_id"],
+                          "value": werte[tag["name"]]}
+            for tag in tags
+        }
         payload = {
             "message_id": str(uuid.uuid4()),
             "time": datetime.now(timezone.utc).isoformat(),
-            "sensor_id": sensor_id,
-            "values": werte,
+            "site_id": site_id,
+            "values": werte_pro_tag,
         }
         # QoS 1: Der lokale Broker uebernimmt die Nachricht zuverlaessig
         # und puffert sie fuer die Bridge zum zentralen Broker.
