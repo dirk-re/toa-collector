@@ -63,8 +63,12 @@ identisch, nur config.ini und MQTT-Benutzername unterscheiden sich.
 # Python 3.12 (oder neuer): offizieller Installer,
 # Häkchen "Add python.exe to PATH" setzen.
 
-# Mosquitto: offiziellen Windows-Installer von mosquitto.org installieren.
-# Der Installer legt einen Windows-Dienst "mosquitto" an.
+# Mosquitto: offiziellen Windows-Installer von mosquitto.org installieren
+# und die Komponente "Service" auswählen. Der Installer registriert den
+# Windows-Dienst "mosquitto" über den eingebauten Dienstmodus von mosquitto.exe
+# (Aufrufargument "run") und setzt die Systemvariable MOSQUITTO_DIR auf das
+# Installationsverzeichnis. Im Dienstmodus liest Mosquitto seine Konfiguration
+# aus diesem Verzeichnis.
 
 # Python-Pakete:
 pip install paho-mqtt python-snap7
@@ -100,6 +104,29 @@ Restart-Service mosquitto
 
 Wichtig: `C:\mosquitto-data` muss für das Dienstkonto, unter dem Mosquitto
 läuft, beschreibbar sein (Rechte über die Registerkarte "Sicherheit" prüfen).
+
+Hinweis: Der Mosquitto-Dienst liest seine Konfiguration aus dem in der
+Systemvariable MOSQUITTO_DIR hinterlegten Verzeichnis (vom Installer
+gesetzt), nicht aus dem aktuellen Arbeitsverzeichnis.
+
+Startet der Dienst nicht und bleibt in der Dienste-Verwaltung auf "Beendet"
+stehen (SC-Fehler 1053: "Der Dienst antwortete nicht rechtzeitig auf die
+Start- oder Steuerungsanforderung"), obwohl der manuelle Start mit
+`mosquitto.exe -c mosquitto.conf` funktioniert, wurde der Dienst meist
+manuell per `sc create` mit einem `-c`-Argument statt über den Installer
+bzw. `mosquitto.exe install` registriert. mosquitto.exe meldet sich in
+diesem Fall nicht beim Windows-Dienststeuerungs-Manager. Prüfen mit
+`sc qc mosquitto`: Der BINARY_PATH_NAME muss auf
+`"...\mosquitto.exe" run` lauten. Falls nicht, Dienst entfernen und
+korrekt neu registrieren:
+
+```powershell
+sc.exe stop mosquitto
+sc.exe delete mosquitto
+cd "C:\Program Files\mosquitto"
+.\mosquitto.exe install
+sc.exe start mosquitto
+```
 
 ### 4.4 Publisher testen und als Dienst einrichten
 
@@ -258,6 +285,7 @@ für alle Instanzen auf dem Gerät.
 | Symptom | Prüfen |
 |---|---|
 | Publisher startet nicht | config.ini vorhanden? Log in `C:\s7-client\logs\`, Konsole manuell starten |
+| Mosquitto-Dienst startet nicht (Fehler 1053) | `sc qc mosquitto`: BINARY_PATH_NAME muss `"...\mosquitto.exe" run` lauten, sonst Dienst per `sc.exe delete mosquitto` entfernen und mit `mosquitto.exe install` neu registrieren (Abschnitt 4.3); MOSQUITTO_DIR gesetzt? |
 | Keine Werte, "PLC nicht erreichbar" | IP, Rack 0/Slot 1, PUT/GET im TIA Portal freigegeben, DB nicht optimiert |
 | Keine Nachrichten am zentralen Broker | Bridge-Konfiguration, ZENTRAL-IP, Benutzer/Passwort, Windows-Firewall (Port 1883) |
 | Tabelle bleibt leer | db_writer-Log, DB_DSN, Rechte des Datenbankbenutzers |
