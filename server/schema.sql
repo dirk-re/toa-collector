@@ -27,5 +27,6 @@ SELECT create_hypertable('measurements', 'time',
                          if_not_exists => TRUE,
                          chunk_time_interval => INTERVAL '1 day');
 
--- Optional: nach 90 Tagen alte Chunks automatisch loeschen
--- SELECT add_retention_policy('measurements', INTERVAL '90 days');
+-- Komprimierung (7 Tage), Langzeit-Aggregate (Minute/Stunde/Tag) und
+-- Aufbewahrung der Rohdaten (5 Jahre) werden separat eingerichtet:
+-- siehe aggregations.sql, einmalig nach dieser Datei ausfuehren.
