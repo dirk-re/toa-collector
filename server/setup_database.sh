@@ -16,9 +16,16 @@
 # Voraussetzungen:
 #   - Debian 13 mit PostgreSQL 17 und TimescaleDB-Extension
 #     (Paketinstallation: ANLEITUNG.md, Abschnitt 5.1)
+#     ODER TimescaleDB im Docker-Container: dann im Konfigurationsblock
+#     DB_UEBER_DOCKER="yes" und DOCKER_CONTAINER auf den Containernamen
+#     setzen. Alle Datenbankbefehle laufen dann ueber docker exec im
+#     Container; eine Paketinstallation auf dem Host ist nicht noetig.
 #   - Aufruf als root oder mit sudo:
 #       sudo bash setup_database.sh
-#   - schema.sql und aggregations.sql im selben Verzeichnis wie dieses Skript
+#     (im Docker-Modus genuegt die Mitgliedschaft in der Gruppe docker)
+#   - schema.sql und aggregations.sql im selben Verzeichnis wie dieses
+#     Skript. Sie muessen nicht im Container liegen: das Skript spielt
+#     sie ueber stdin ein.
 #
 # Das Skript ist idempotent: ein erneuter Aufruf ist unproblematisch
 # (IF NOT EXISTS / if_not_exists). Bei einer Wiederholung auf einer
@@ -35,6 +42,8 @@
 #     den Standard-Tabellennamen "measurements" in den SQL-Dateien
 #     automatisch durch DB_TABLE (einschliesslich der abgeleiteten Namen
 #     *_1min, *_1h, *_1day) und legt den Benutzer samt Passwort an.
+#     Laeuft die Datenbank im Docker-Container, zusaetzlich
+#     DB_UEBER_DOCKER="yes" und DOCKER_CONTAINER setzen.
 #
 # (2) server/db_writer.py - Konfigurationsblock am Dateianfang
 #     (ca. Zeilen 16 bis 23). Muss die gleichen Werte wie dieses Skript
@@ -42,7 +51,10 @@
 #       - DB_DSN (ca. Zeile 21), Zwischenstand im Paket:
 #           DB_DSN = "host=127.0.0.1 dbname=sensordaten user=writer password=GEHEIM"
 #         Diese Werte muessen den Angaben hier entsprechen:
-#           host     -> DB_HOST      (Adresse des DB-Geraets)
+#           host     -> DB_HOST      (Adresse des DB-Geraets; bei Docker
+#                                   laeuft db_writer.py auf dem Host und
+#                                   verbindet sich auf den veroeffentlichten
+#                                   Port, sofern nicht selbst containerisiert)
 #           dbname   -> DB_NAME
 #           user     -> DB_USER
 #           password -> DB_PASSWORD
@@ -73,8 +85,20 @@ DB_USER="writer"           # Datenbankbenutzer fuer den db_writer
 DB_PASSWORD="GEHEIM"       # Passwort des Datenbankbenutzers
 DB_TABLE="measurements"    # Name der Messtabelle (Standard: measurements)
 DB_HOST="127.0.0.1"        # Adresse, unter der db_writer.py die
-                           # Datenbank erreicht (i. d. R. dieses Geraet)
-DB_PORT="5432"             # PostgreSQL-Port
+                           # Datenbank erreicht (bei Docker: Adresse des
+                           # Hosts, wenn der Port veroeffentlicht ist)
+DB_PORT="5432"             # PostgreSQL-Port (bei Docker: der in -p
+                           # veroeffentlichte Host-Port)
+
+# Laeuft die Datenbank in einem Docker-Container (z. B. offizielles Image
+# timescale/timescaledb)?
+#   yes = alle Datenbankbefehle laufen ueber docker exec im Container
+#         (DOCKER_CONTAINER auf den Containernamen setzen, siehe 'docker ps');
+#         auf dem Host ist keine Paketinstallation noetig.
+#   no  = native installiertes PostgreSQL auf diesem Geraet
+#         (Standardweg aus ANLEITUNG.md, Abschnitt 5.1).
+DB_UEBER_DOCKER="no"
+DOCKER_CONTAINER="timescaledb"
 
 # Soll der Benutzer ausserdem die drei Aggregat-Views lesen duerfen
 # (${DB_TABLE}_1min, ${DB_TABLE}_1h, ${DB_TABLE}_1day; nuetzlich fuer
@@ -93,9 +117,12 @@ info() { echo "[Hinweis] $*"; }
 err()  { echo "[Fehler]  $*" >&2; }
 die()  { err "$*"; exit 1; }
 
-# Befehle als PostgreSQL-Administrator (Systembenutzer postgres) ausfuehren:
+# Datenbankbefehle als PostgreSQL-Administrator ausfuehren:
+# im Docker-Modus im Container, ansonsten als Systembenutzer postgres.
 as_pg() {
-    if [ "$(id -u)" -eq 0 ]; then
+    if [ "$DB_UEBER_DOCKER" = "yes" ]; then
+        docker exec -i "$DOCKER_CONTAINER" "$@"
+    elif [ "$(id -u)" -eq 0 ]; then
         runuser -u postgres -- "$@"
     else
         sudo -u postgres -- "$@"
@@ -105,12 +132,11 @@ as_pg() {
 #-------------------------------------------------------------------------------
 # Vorpruefungen
 #-------------------------------------------------------------------------------
-command -v psql    >/dev/null 2>&1 || die "psql nicht gefunden. PostgreSQL zuerst installieren (ANLEITUNG.md, Abschnitt 5.1)."
-command -v runuser >/dev/null 2>&1 || die "runuser nicht gefunden. Das Skript bitte als root oder mit sudo ausfuehren."
 [ -r "$SCHEMA_SQL" ]         || die "schema.sql nicht gefunden in: $SCRIPT_DIR"
 [ -r "$AGGREGATIONS_SQL" ]   || die "aggregations.sql nicht gefunden in: $SCRIPT_DIR"
 [ -n "$DB_PASSWORD" ]        || die "DB_PASSWORD ist leer. Bitte ein Passwort vergeben."
 case "$GRANT_AGGREGATE_READ" in yes|no) ;; *) die "GRANT_AGGREGATE_READ muss yes oder no sein." ;; esac
+case "$DB_UEBER_DOCKER"       in yes|no) ;; *) die "DB_UEBER_DOCKER muss yes oder no sein." ;; esac
 
 for var_name in DB_NAME DB_USER DB_TABLE; do
     val="${!var_name}"
@@ -120,27 +146,38 @@ for var_name in DB_NAME DB_USER DB_TABLE; do
     esac
 done
 
-as_pg true 2>/dev/null || die "Wechsel zum Benutzer postgres fehlgeschlagen. Skript als root oder mit sudo ausfuehren."
+if [ "$DB_UEBER_DOCKER" = "yes" ]; then
+    command -v docker >/dev/null 2>&1 || die "docker nicht gefunden. DB_UEBER_DOCKER=\"yes\" benoetigt die docker-CLI."
+    [ -n "$DOCKER_CONTAINER" ] || die "DOCKER_CONTAINER ist leer. Bitte den Containernamen eintragen ('docker ps')."
+    docker inspect "$DOCKER_CONTAINER" >/dev/null 2>&1 || die "Container '$DOCKER_CONTAINER' nicht gefunden. Laufende Container mit 'docker ps' pruefen."
+    [ "$(docker inspect -f '{{.State.Running}}' "$DOCKER_CONTAINER")" = "true" ] || die "Container '$DOCKER_CONTAINER' laeuft nicht."
+    info "Docker-Modus: alle Datenbankbefehle laufen im Container '$DOCKER_CONTAINER'."
+else
+    command -v psql    >/dev/null 2>&1 || die "psql nicht gefunden. PostgreSQL zuerst installieren (ANLEITUNG.md, Abschnitt 5.1) oder DB_UEBER_DOCKER=\"yes\" fuer den Betrieb im Docker-Container."
+    command -v runuser >/dev/null 2>&1 || die "runuser nicht gefunden. Das Skript bitte als root oder mit sudo ausfuehren."
+fi
 
-if [ -z "$(as_pg psql -d postgres -tAc "SELECT 1 FROM pg_available_extensions WHERE name = 'timescaledb'")" ]; then
-    die "Die TimescaleDB-Extension ist nicht installiert. Bitte zuerst ANLEITUNG.md, Abschnitt 5.1 (Paketinstallation) ausfuehren."
+as_pg true 2>/dev/null || die "Zugriff auf PostgreSQL fehlgeschlagen (Container bzw. Benutzer postgres). Skript als root oder mit sudo ausfuehren."
+
+if [ -z "$(as_pg psql -U postgres -d postgres -tAc "SELECT 1 FROM pg_available_extensions WHERE name = 'timescaledb'")" ]; then
+    die "Die TimescaleDB-Extension ist nicht installiert. Abhilfe: bei Docker ein TimescaleDB-Image verwenden (timescale/timescaledb); nativ siehe ANLEITUNG.md, Abschnitt 5.1."
 fi
 
 #-------------------------------------------------------------------------------
 # 1) Datenbank anlegen
 #-------------------------------------------------------------------------------
-if [ -n "$(as_pg psql -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$DB_NAME'")" ]; then
+if [ -n "$(as_pg psql -U postgres -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$DB_NAME'")" ]; then
     log "Datenbank '$DB_NAME' existiert bereits."
 else
     log "Datenbank '$DB_NAME' wird angelegt ..."
-    as_pg createdb "$DB_NAME"
+    as_pg createdb -U postgres "$DB_NAME"
 fi
 
 #-------------------------------------------------------------------------------
 # 2) TimescaleDB-Erweiterung aktivieren
 #-------------------------------------------------------------------------------
 log "TimescaleDB-Erweiterung wird aktiviert ..."
-as_pg psql -d "$DB_NAME" -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS timescaledb;" >/dev/null
+as_pg psql -U postgres -d "$DB_NAME" -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS timescaledb;" >/dev/null
 
 #-------------------------------------------------------------------------------
 # 3) + 4) schema.sql und aggregations.sql einspielen
@@ -149,6 +186,10 @@ as_pg psql -d "$DB_NAME" -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS t
 # Tabellennamen wird eine Arbeitskopie erzeugt und darin "measurements"
 # global ersetzt (inkl. measurements_1min/_1h/_1day). Wird kein abweichender
 # Name vergeben, sind die Kopien identisch zum Original.
+#
+# Der Modus ist bewusst identisch fuer beide Betriebsarten: die SQL-Dateien
+# werden per stdin (-f -) durchgereicht. Nativ liest psql direkt, im
+# Docker-Modus ueber docker exec -i vom Host aus.
 #-------------------------------------------------------------------------------
 ARBEITS_VERZ="$(mktemp -d)"
 trap 'rm -rf "$ARBEITS_VERZ"' EXIT
@@ -162,10 +203,12 @@ if [ "$DB_TABLE" != "measurements" ]; then
 fi
 
 log "schema.sql wird eingespielt ..."
-as_pg psql -d "$DB_NAME" -v ON_ERROR_STOP=1 -f "$ARBEITS_VERZ/schema.sql" >/dev/null
+as_pg psql -U postgres -d "$DB_NAME" -v ON_ERROR_STOP=1 \
+    -f - < "$ARBEITS_VERZ/schema.sql" >/dev/null
 
 log "aggregations.sql wird eingespielt (Komprimierung, Aggregate, Aufbewahrung) ..."
-as_pg psql -d "$DB_NAME" -v ON_ERROR_STOP=1 -f "$ARBEITS_VERZ/aggregations.sql" >/dev/null
+as_pg psql -U postgres -d "$DB_NAME" -v ON_ERROR_STOP=1 \
+    -f - < "$ARBEITS_VERZ/aggregations.sql" >/dev/null
 
 #-------------------------------------------------------------------------------
 # 5) Datenbankbenutzer anlegen bzw. aktualisieren und Rechte erteilen
@@ -174,27 +217,27 @@ as_pg psql -d "$DB_NAME" -v ON_ERROR_STOP=1 -f "$ARBEITS_VERZ/aggregations.sql" 
 # noetige SQL-Quotierung selbst hinzu. Sonderzeichen im Passwort, auch
 # einfache Hochkommas, sind damit unproblematisch.
 #-------------------------------------------------------------------------------
-if [ -n "$(as_pg psql -d postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname = '$DB_USER'")" ]; then
+if [ -n "$(as_pg psql -U postgres -d postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname = '$DB_USER'")" ]; then
     log "Datenbankbenutzer '$DB_USER' existiert bereits, Passwort wird aktualisiert ..."
-    as_pg psql -d postgres -v ON_ERROR_STOP=1 \
+    as_pg psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
         -v rol="$DB_USER" -v pass="$DB_PASSWORD" \
         -c "ALTER ROLE :\"rol\" WITH LOGIN PASSWORD :'pass';" \
         >/dev/null
 else
     log "Datenbankbenutzer '$DB_USER' wird angelegt ..."
-    as_pg psql -d postgres -v ON_ERROR_STOP=1 \
+    as_pg psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
         -v rol="$DB_USER" -v pass="$DB_PASSWORD" \
         -c "CREATE ROLE :\"rol\" LOGIN PASSWORD :'pass';" >/dev/null
 fi
 
 log "Rechte werden erteilt ..."
-as_pg psql -d "$DB_NAME" -v ON_ERROR_STOP=1 \
+as_pg psql -U postgres -d "$DB_NAME" -v ON_ERROR_STOP=1 \
     -c "GRANT CONNECT ON DATABASE $DB_NAME TO $DB_USER;" \
     -c "GRANT USAGE ON SCHEMA public TO $DB_USER;" \
     -c "GRANT INSERT, SELECT ON $DB_TABLE TO $DB_USER;" >/dev/null
 
 if [ "$GRANT_AGGREGATE_READ" = "yes" ]; then
-    as_pg psql -d "$DB_NAME" -v ON_ERROR_STOP=1 \
+    as_pg psql -U postgres -d "$DB_NAME" -v ON_ERROR_STOP=1 \
         -c "GRANT SELECT ON ${DB_TABLE}_1min, ${DB_TABLE}_1h, ${DB_TABLE}_1day TO $DB_USER;" >/dev/null
     log "Lesezugriff auf die Aggregate eingerichtet."
 fi
@@ -203,15 +246,32 @@ fi
 # 6) Verbindungstest mit den eingerichteten Zugangsdaten
 #-------------------------------------------------------------------------------
 log "Verbindungstest als '$DB_USER' ueber $DB_HOST:$DB_PORT ..."
-if PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
-        -tAc "SELECT 'Verbindung ok';" 2>/dev/null; then
-    :
+if command -v psql >/dev/null 2>&1; then
+    if PGPASSWORD="$DB_PASSWORD" psql -h "$DB_HOST" -p "$DB_PORT" -U "$DB_USER" -d "$DB_NAME" \
+            -tAc "SELECT 'Verbindung ok';" 2>/dev/null; then
+        :
+    else
+        info "Der Verbindungstest ist fehlgeschlagen. Moegliche Ursachen:"
+        info "  - DB_HOST/DB_PORT falsch (db_writer muss das DB-Geraet erreichen)."
+        if [ "$DB_UEBER_DOCKER" = "yes" ]; then
+            info "  - Ist der Port im Container veroeffentlicht (-p $DB_PORT:5432)?"
+        fi
+        info "  - pg_hba.conf erlaubt keine Passwort-Anmeldung fuer diesen Host."
+        info "    Abhilfe:  host  all  all  <netz>  scram-sha-256"
+        info "    und danach neu laden (native Installation: systemctl reload postgresql;"
+        info "    Docker: Container neu starten bzw. Image-Konfiguration anpassen)."
+    fi
+elif [ "$DB_UEBER_DOCKER" = "yes" ]; then
+    info "psql auf dem Host nicht gefunden; der Test laeuft daher im Container."
+    info "Er prueft die Zugangsdaten, aber nicht die Portweiterleitung (-p)."
+    if docker exec -i -e PGPASSWORD="$DB_PASSWORD" "$DOCKER_CONTAINER" \
+            psql -U "$DB_USER" -d "$DB_NAME" -tAc "SELECT 'Verbindung ok';" >/dev/null 2>&1; then
+        log "Verbindungstest im Container erfolgreich."
+    else
+        info "Der Verbindungstest im Container ist fehlgeschlagen."
+    fi
 else
-    info "Der Verbindungstest ist fehlgeschlagen. Moegliche Ursachen:"
-    info "  - DB_HOST/DB_PORT falsch (db_writer muss das DB-Geraet erreichen)."
-    info "  - pg_hba.conf erlaubt keine Passwort-Anmeldung fuer diesen Host."
-    info "    Abhilfe:  host  all  all  <netz>  scram-sha-256"
-    info "    und danach:  systemctl reload postgresql"
+    info "psql auf dem Host nicht gefunden; Verbindungstest uebersprungen."
 fi
 
 #-------------------------------------------------------------------------------
@@ -220,6 +280,11 @@ fi
 echo
 log "Datenbankeinrichtung abgeschlossen."
 echo "      Datenbank : $DB_NAME"
+if [ "$DB_UEBER_DOCKER" = "yes" ]; then
+    echo "      Modus     : Docker-Container '$DOCKER_CONTAINER'"
+else
+    echo "      Modus     : native Installation (PostgreSQL auf diesem Geraet)"
+fi
 echo "      Tabelle   : $DB_TABLE (Hypertable, TimescaleDB)"
 echo "      Benutzer  : $DB_USER (INSERT/SELECT auf die Tabelle)"
 echo

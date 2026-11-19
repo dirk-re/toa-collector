@@ -203,6 +203,8 @@ Skripts vorgegeben:
 | `DB_HOST` | Adresse, unter der `db_writer.py` die Datenbank erreicht | `127.0.0.1` |
 | `DB_PORT` | PostgreSQL-Port | `5432` |
 | `GRANT_AGGREGATE_READ` | Lesezugriff auf die drei Aggregat-Views (`yes`/`no`) | `yes` |
+| `DB_UEBER_DOCKER` | `yes`: Datenbank läuft im Docker-Container, alle Befehle über `docker exec` | `no` |
+| `DOCKER_CONTAINER` | Name des Containers (nur im Docker-Modus) | `timescaledb` |
 
 Aufruf auf dem DB-Gerät als root beziehungsweise mit sudo:
 
@@ -239,6 +241,43 @@ psql -d sensordaten -c "GRANT INSERT, SELECT ON measurements TO writer;"
 Bei einem abweichenden Tabellennamen muss in diesem Fall der Name in
 `schema.sql` und `aggregations.sql` manuell ersetzt werden; das
 Setup-Skript nimmt diese Anpassung automatisch vor.
+
+#### Betrieb von TimescaleDB in einem Docker-Container
+
+Läuft die Datenbank nicht als Debian-Paket, sondern im Docker-Container
+(z. B. offizielles Image `timescale/timescaledb`), entfällt die
+Paketinstallation aus Abschnitt 5.1 auf dem Host. Im Konfigurationsblock
+von `setup_database.sh` sind dann zusätzlich `DB_UEBER_DOCKER="yes"`
+sowie der Containername in `DOCKER_CONTAINER` zu setzen; alle weiteren
+Variablen und der Aufruf bleiben unverändert.
+
+Beispiel für den Start des Containers (Port 5432 auf dem Host
+veröffentlicht, Daten im Volume):
+
+```bash
+docker run -d --name timescaledb \
+  -e POSTGRES_PASSWORD=ADMIN_PASSWORT \
+  -p 5432:5432 \
+  -v timescaledb-data:/var/lib/postgresql/data \
+  timescale/timescaledb:latest-pg17
+```
+
+Hinweise zum Docker-Betrieb:
+
+- `schema.sql` und `aggregations.sql` müssen nicht im Container liegen;
+  das Skript spielt sie über stdin über `docker exec` ein.
+- `DB_HOST`/`DB_PORT` gelten aus der Sicht von `db_writer.py`: läuft der
+  db_writer auf demselben Host wie Docker, sind es `127.0.0.1` und der
+  in `-p` veröffentlichte Port. Läuft der db_writer selbst in einem
+  Container (z. B. docker compose), ist `DB_HOST` der Dienstname im
+  gemeinsamen Netz.
+- Der Verbindungstest prüft vom Host aus, ob eine Anmeldung auf
+  `DB_HOST:DB_PORT` möglich ist; dafür genügt das Paket
+  `postgresql-client`. Ohne lokales psql fällt der Test in den Container
+  zurück und prüft die Zugangsdaten, aber nicht die Portweiterleitung.
+- Aufruf unverändert: `sudo bash setup_database.sh` (im Docker-Modus
+  genügt die Mitgliedschaft in der Gruppe `docker`).
+- Das Skript bleibt idempotent und kann wie gehabt wiederholt werden.
 
 ### 5.2 Zentraler Mosquitto-Broker (Debian 13)
 
@@ -299,7 +338,7 @@ Zugangsdaten vorkommen. Diese Angaben müssen zueinander passen.
 
 | Datei | Stelle | Was ist anzupassen? |
 |---|---|---|
-| `server/setup_database.sh` | Konfigurationsblock am Dateianfang | `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_TABLE`, `DB_HOST`, `DB_PORT`, optional `GRANT_AGGREGATE_READ`. Dies ist die einzige Stelle, an der die Datenbank konfiguriert wird. `schema.sql` und `aggregations.sql` brauchen keine Bearbeitung: das Skript ersetzt einen abweichenden Tabellennamen automatisch, einschliesslich der abgeleiteten Namen `_1min`, `_1h`, `_1day` (Arbeitskopien, Originale bleiben unverändert). |
+| `server/setup_database.sh` | Konfigurationsblock am Dateianfang | `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_TABLE`, `DB_HOST`, `DB_PORT`, optional `GRANT_AGGREGATE_READ`; läuft die Datenbank im Docker-Container, zusätzlich `DB_UEBER_DOCKER="yes"` und `DOCKER_CONTAINER`. Dies ist die einzige Stelle, an der die Datenbank konfiguriert wird. `schema.sql` und `aggregations.sql` brauchen keine Bearbeitung: das Skript ersetzt einen abweichenden Tabellennamen automatisch, einschliesslich der abgeleiteten Namen `_1min`, `_1h`, `_1day` (Arbeitskopien, Originale bleiben unverändert). |
 | `server/db_writer.py` | `DB_DSN`, Konfigurationsblock am Dateianfang (ca. Zeile 21) | Muss exakt den Werten des Setup-Skripts entsprechen: `host=` → `DB_HOST`, `dbname=` → `DB_NAME`, `user=` → `DB_USER`, `password=` → `DB_PASSWORD`. Das Skript druckt die fertige Zeile am Ende aus. |
 | `server/db_writer.py` | `INSERT_SQL` (ca. Zeilen 26 bis 30) | Nur falls in `setup_database.sh` ein von `measurements` abweichender `DB_TABLE` vergeben wurde: `INSERT INTO measurements` entsprechend ändern, sonst schreibt der db_writer in eine nicht vorhandene Tabelle. |
 | `server/db_writer.py` | `BROKER_USER`, `BROKER_PASS` (ca. Zeilen 18 und 19) | Keine Datenbank-, sondern MQTT-Zugangsdaten des zentralen Mosquitto-Brokers (Abschnitt 5.2, Benutzer `db-subscriber`). |
