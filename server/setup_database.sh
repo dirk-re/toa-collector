@@ -248,21 +248,24 @@ as_pg psql -U "$DB_ADMIN_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 \
 #-------------------------------------------------------------------------------
 # 5) Datenbankbenutzer anlegen bzw. aktualisieren und Rechte erteilen
 #
-# Das Passwort wird als psql-Variable uebergeben (:'pass'), psql fuegt die
-# noetige SQL-Quotierung selbst hinzu. Sonderzeichen im Passwort, auch
-# einfache Hochkommas, sind damit unproblematisch.
+# Das Passwort wird direkt als SQL-Literal eingebaut; einfache Hochkommas im
+# Passwort werden dazu verdoppelt (SQL-Standard-Quotierung). DB_USER ist als
+# Identifier validiert. Bewusst KEINE psql-Variablen (:"rol"/:'pass') in -c:
+# psql interpoliert Variablen innerhalb von -c nicht (die -c-Dokumentation
+# verlangt einen serverseitig voll parsbaren Befehl), der Server wuerde die
+# Platzhalter wortgleich erhalten und einen Syntaxfehler melden.
 #-------------------------------------------------------------------------------
+DB_PASSWORD_SQL="$(printf '%s' "$DB_PASSWORD" | sed "s/'/''/g")"
+
 if [ -n "$(as_pg psql -U "$DB_ADMIN_USER" -d "$ADMIN_DB" -tAc "SELECT 1 FROM pg_roles WHERE rolname = '$DB_USER'")" ]; then
     log "Datenbankbenutzer '$DB_USER' existiert bereits, Passwort wird aktualisiert ..."
     as_pg psql -U "$DB_ADMIN_USER" -d "$ADMIN_DB" -v ON_ERROR_STOP=1 \
-        -v rol="$DB_USER" -v pass="$DB_PASSWORD" \
-        -c "ALTER ROLE :\"rol\" WITH LOGIN PASSWORD :'pass';" \
+        -c "ALTER ROLE \"$DB_USER\" WITH LOGIN PASSWORD '$DB_PASSWORD_SQL';" \
         >/dev/null
 else
     log "Datenbankbenutzer '$DB_USER' wird angelegt ..."
     as_pg psql -U "$DB_ADMIN_USER" -d "$ADMIN_DB" -v ON_ERROR_STOP=1 \
-        -v rol="$DB_USER" -v pass="$DB_PASSWORD" \
-        -c "CREATE ROLE :\"rol\" LOGIN PASSWORD :'pass';" >/dev/null
+        -c "CREATE ROLE \"$DB_USER\" LOGIN PASSWORD '$DB_PASSWORD_SQL';" >/dev/null
 fi
 
 log "Rechte werden erteilt ..."
