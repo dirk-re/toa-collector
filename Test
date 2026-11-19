@@ -1,1 +1,21 @@
 
+docker exec -i bde-timescaledb psql -U postgres -d timescale <<'SQL'
+\echo '=== Datenbanksitzungen ==='
+SELECT pid, usename, state, wait_event_type, wait_event,
+       now() - xact_start     AS xact_dauer,
+              now() - state_change   AS seit_statuswechsel,
+                     left(query, 70)        AS query
+                       FROM pg_stat_activity
+                        WHERE datname = 'timescale'
+                         ORDER BY pid;
+
+                         \echo '=== Wer blockiert wen? ==='
+                         SELECT pid, pg_blocking_pids(pid) AS blockiert_durch,
+                                wait_event_type, wait_event, left(query, 70) AS query
+                                  FROM pg_stat_activity
+                                   WHERE cardinality(pg_blocking_pids(pid)) > 0;
+                                   SQL
+
+                                   echo '=== db_writer-Prozesse auf dem Host ==='
+                                   ps aux | grep -v grep | grep db_writer
+                                   systemctl status db-writer --no-pager | head -6
