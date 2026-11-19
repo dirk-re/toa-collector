@@ -1,0 +1,40 @@
+# systemd-Dienst für den db_writer, wenn TimescaleDB im Docker-Container
+# läuft (nur Linux). Diese Variante ersetzt db-writer.service, das auf das
+# native postgresql.service wartet.
+#
+# Zielort: /etc/systemd/system/db-writer.service
+#   Die Datei erhält dort den gleichen Namen wie die native Variante;
+#   es darf nur EINE der beiden Service-Dateien installiert sein.
+# Danach:  systemctl daemon-reload && systemctl enable --now db-writer
+#
+# Unterschied zur nativen Variante: dieser Dienst WARTET vor dem Start,
+# bis der Container läuft und PostgreSQL darin Verbindungen annimmt
+# (Schleife mit docker exec ... pg_isready). Der Container kann beliebig
+# gestartet sein (docker run mit Restart-Policy, docker compose); der
+# Dienst benötigt nur die docker-CLI auf dem Host. Der Start wartet
+# höchstens TimeoutStartSec=300 Sekunden; läuft der Container danach
+# noch nicht, schlägt der Start fehl und wird über Restart=always
+# erneut versucht.
+#
+# ANZUPASSEN: Heißt der Container nicht "timescaledb", den Namen in der
+# ExecStartPre-Zeile ändern (gleicher Name wie DOCKER_CONTAINER in
+# setup_database.sh; Containernamen zeigt 'docker ps').
+# Hinweis: db_writer.py verbindet sich über den veröffentlichten Port
+# (-p 5432:5432), nicht aus dem Container; das Warten prüft nur die
+# Bereitschaft im Container.
+
+[Unit]
+Description=S7 DB Writer (TimescaleDB im Docker-Container)
+Wants=network-online.target docker.service
+After=network-online.target docker.service mosquitto.service
+
+[Service]
+# Warten, bis der Container läuft und PostgreSQL im Container bereit ist:
+ExecStartPre=/bin/sh -c 'until docker exec timescaledb pg_isready -U postgres -q; do sleep 2; done'
+ExecStart=/usr/bin/python3 /opt/s7/db_writer.py
+Restart=always
+RestartSec=5
+TimeoutStartSec=300
+
+[Install]
+WantedBy=multi-user.target
