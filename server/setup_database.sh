@@ -43,7 +43,10 @@
 #     automatisch durch DB_TABLE (einschliesslich der abgeleiteten Namen
 #     *_1min, *_1h, *_1day) und legt den Benutzer samt Passwort an.
 #     Laeuft die Datenbank im Docker-Container, zusaetzlich
-#     DB_UEBER_DOCKER="yes" und DOCKER_CONTAINER setzen.
+#     DB_UEBER_DOCKER="yes" und DOCKER_CONTAINER setzen. Wurde der Container
+#     mit POSTGRES_USER=<andererName> statt des Standards "postgres"
+#     erstellt, zudem DB_ADMIN_USER auf diesen Namen setzen (sonst meldet
+#     der Container "role postgres does not exist").
 #
 # (2) server/db_writer.py - Konfigurationsblock am Dateianfang
 #     (ca. Zeilen 16 bis 23). Muss die gleichen Werte wie dieses Skript
@@ -99,6 +102,15 @@ DB_PORT="5432"             # PostgreSQL-Port (bei Docker: der in -p
 #         (Standardweg aus ANLEITUNG.md, Abschnitt 5.1).
 DB_UEBER_DOCKER="no"
 DOCKER_CONTAINER="timescaledb"
+
+# Administrator-Zugang fuer die Einrichtung (SUPERUSER-Rolle):
+#   Docker-Modus: Standard des offiziellen Images ist "postgres"
+#     (timescale/timescaledb). Wurde der Container mit
+#     POSTGRES_USER=<andererName> erstellt, hier genau diesen Namen
+#     eintragen (pruefen mit: docker exec <Container> env | grep ^POSTGRES).
+#   Native Installation: immer "postgres" lassen (das Skript arbeitet dort
+#     als Systembenutzer postgres).
+DB_ADMIN_USER="postgres"
 
 # Soll der Benutzer ausserdem die drei Aggregat-Views lesen duerfen
 # (${DB_TABLE}_1min, ${DB_TABLE}_1h, ${DB_TABLE}_1day; nuetzlich fuer
@@ -157,27 +169,50 @@ else
     command -v runuser >/dev/null 2>&1 || die "runuser nicht gefunden. Das Skript bitte als root oder mit sudo ausfuehren."
 fi
 
-as_pg true 2>/dev/null || die "Zugriff auf PostgreSQL fehlgeschlagen (Container bzw. Benutzer postgres). Skript als root oder mit sudo ausfuehren."
+as_pg true 2>/dev/null || die "Zugriff auf den Container bzw. die lokale Installation fehlgeschlagen. Skript als root bzw. mit sudo ausfuehren (Docker-Modus: Gruppenmitgliedschaft docker genuegt)."
 
-if [ -z "$(as_pg psql -U postgres -d postgres -tAc "SELECT 1 FROM pg_available_extensions WHERE name = 'timescaledb'")" ]; then
+# Wartungsdatenbank ermitteln: Standard ist "postgres"; wurde der Container
+# mit POSTGRES_USER=<name> erstellt, existiert weder die Rolle "postgres" noch
+# die Datenbank "postgres", und die Wartungsdatenbank heisst wie der
+# Administrator. Beide Faelle werden automatisch erkannt.
+ADMIN_DB=""
+for kandidat in postgres "$DB_ADMIN_USER"; do
+    if as_pg psql -U "$DB_ADMIN_USER" -d "$kandidat" -tAc "SELECT 1" >/dev/null 2>&1; then
+        ADMIN_DB="$kandidat"
+        break
+    fi
+done
+if [ -z "$ADMIN_DB" ]; then
+    if [ "$DB_UEBER_DOCKER" = "yes" ]; then
+        die "Anmeldung als Administrator '$DB_ADMIN_USER' fehlgeschlagen; die Rolle existiert vermutlich nicht. Im Docker-Modus muss DB_ADMIN_USER dem POSTGRES_USER des Containers entsprechen (pruefen: docker exec $DOCKER_CONTAINER env | grep ^POSTGRES_USER)."
+    fi
+    die "Anmeldung als Administrator '$DB_ADMIN_USER' fehlgeschlagen. Bei nativer Installation DB_ADMIN_USER bitte auf 'postgres' lassen und das Skript als root bzw. mit sudo ausfuehren."
+fi
+if [ "$ADMIN_DB" != "postgres" ]; then
+    info "Wartungsdatenbank: '$ADMIN_DB' (Container wurde offenbar mit POSTGRES_USER='$DB_ADMIN_USER' eingerichtet)."
+fi
+
+if [ -z "$(as_pg psql -U "$DB_ADMIN_USER" -d "$ADMIN_DB" -tAc "SELECT 1 FROM pg_available_extensions WHERE name = 'timescaledb'")" ]; then
     die "Die TimescaleDB-Extension ist nicht installiert. Abhilfe: bei Docker ein TimescaleDB-Image verwenden (timescale/timescaledb); nativ siehe ANLEITUNG.md, Abschnitt 5.1."
 fi
 
 #-------------------------------------------------------------------------------
 # 1) Datenbank anlegen
 #-------------------------------------------------------------------------------
-if [ -n "$(as_pg psql -U postgres -d postgres -tAc "SELECT 1 FROM pg_database WHERE datname = '$DB_NAME'")" ]; then
+if [ -n "$(as_pg psql -U "$DB_ADMIN_USER" -d "$ADMIN_DB" -tAc "SELECT 1 FROM pg_database WHERE datname = '$DB_NAME'")" ]; then
     log "Datenbank '$DB_NAME' existiert bereits."
 else
     log "Datenbank '$DB_NAME' wird angelegt ..."
-    as_pg createdb -U postgres "$DB_NAME"
+    as_pg psql -U "$DB_ADMIN_USER" -d "$ADMIN_DB" -v ON_ERROR_STOP=1 \
+        -c "CREATE DATABASE $DB_NAME;" >/dev/null
 fi
 
 #-------------------------------------------------------------------------------
 # 2) TimescaleDB-Erweiterung aktivieren
 #-------------------------------------------------------------------------------
 log "TimescaleDB-Erweiterung wird aktiviert ..."
-as_pg psql -U postgres -d "$DB_NAME" -v ON_ERROR_STOP=1 -c "CREATE EXTENSION IF NOT EXISTS timescaledb;" >/dev/null
+as_pg psql -U "$DB_ADMIN_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 \
+    -c "CREATE EXTENSION IF NOT EXISTS timescaledb;" >/dev/null
 
 #-------------------------------------------------------------------------------
 # 3) + 4) schema.sql und aggregations.sql einspielen
@@ -203,11 +238,11 @@ if [ "$DB_TABLE" != "measurements" ]; then
 fi
 
 log "schema.sql wird eingespielt ..."
-as_pg psql -U postgres -d "$DB_NAME" -v ON_ERROR_STOP=1 \
+as_pg psql -U "$DB_ADMIN_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 \
     -f - < "$ARBEITS_VERZ/schema.sql" >/dev/null
 
 log "aggregations.sql wird eingespielt (Komprimierung, Aggregate, Aufbewahrung) ..."
-as_pg psql -U postgres -d "$DB_NAME" -v ON_ERROR_STOP=1 \
+as_pg psql -U "$DB_ADMIN_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 \
     -f - < "$ARBEITS_VERZ/aggregations.sql" >/dev/null
 
 #-------------------------------------------------------------------------------
@@ -217,27 +252,27 @@ as_pg psql -U postgres -d "$DB_NAME" -v ON_ERROR_STOP=1 \
 # noetige SQL-Quotierung selbst hinzu. Sonderzeichen im Passwort, auch
 # einfache Hochkommas, sind damit unproblematisch.
 #-------------------------------------------------------------------------------
-if [ -n "$(as_pg psql -U postgres -d postgres -tAc "SELECT 1 FROM pg_roles WHERE rolname = '$DB_USER'")" ]; then
+if [ -n "$(as_pg psql -U "$DB_ADMIN_USER" -d "$ADMIN_DB" -tAc "SELECT 1 FROM pg_roles WHERE rolname = '$DB_USER'")" ]; then
     log "Datenbankbenutzer '$DB_USER' existiert bereits, Passwort wird aktualisiert ..."
-    as_pg psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+    as_pg psql -U "$DB_ADMIN_USER" -d "$ADMIN_DB" -v ON_ERROR_STOP=1 \
         -v rol="$DB_USER" -v pass="$DB_PASSWORD" \
         -c "ALTER ROLE :\"rol\" WITH LOGIN PASSWORD :'pass';" \
         >/dev/null
 else
     log "Datenbankbenutzer '$DB_USER' wird angelegt ..."
-    as_pg psql -U postgres -d postgres -v ON_ERROR_STOP=1 \
+    as_pg psql -U "$DB_ADMIN_USER" -d "$ADMIN_DB" -v ON_ERROR_STOP=1 \
         -v rol="$DB_USER" -v pass="$DB_PASSWORD" \
         -c "CREATE ROLE :\"rol\" LOGIN PASSWORD :'pass';" >/dev/null
 fi
 
 log "Rechte werden erteilt ..."
-as_pg psql -U postgres -d "$DB_NAME" -v ON_ERROR_STOP=1 \
+as_pg psql -U "$DB_ADMIN_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 \
     -c "GRANT CONNECT ON DATABASE $DB_NAME TO $DB_USER;" \
     -c "GRANT USAGE ON SCHEMA public TO $DB_USER;" \
     -c "GRANT INSERT, SELECT ON $DB_TABLE TO $DB_USER;" >/dev/null
 
 if [ "$GRANT_AGGREGATE_READ" = "yes" ]; then
-    as_pg psql -U postgres -d "$DB_NAME" -v ON_ERROR_STOP=1 \
+    as_pg psql -U "$DB_ADMIN_USER" -d "$DB_NAME" -v ON_ERROR_STOP=1 \
         -c "GRANT SELECT ON ${DB_TABLE}_1min, ${DB_TABLE}_1h, ${DB_TABLE}_1day TO $DB_USER;" >/dev/null
     log "Lesezugriff auf die Aggregate eingerichtet."
 fi

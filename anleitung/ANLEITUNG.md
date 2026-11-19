@@ -206,6 +206,7 @@ Skripts vorgegeben:
 | `GRANT_AGGREGATE_READ` | Lesezugriff auf die drei Aggregat-Views (`yes`/`no`) | `yes` |
 | `DB_UEBER_DOCKER` | `yes`: Datenbank läuft im Docker-Container, alle Befehle über `docker exec` | `no` |
 | `DOCKER_CONTAINER` | Name des Containers (nur im Docker-Modus) | `timescaledb` |
+| `DB_ADMIN_USER` | Name der Administrator-Rolle für die Einrichtung; nur im Docker-Modus relevant, falls der Container mit `POSTGRES_USER=<anderer Name>` erstellt wurde (Standard des Images ist `postgres`; prüfen mit `docker exec <Container> env`). Nativ immer `postgres` lassen. | `postgres` |
 
 Aufruf auf dem DB-Gerät als root beziehungsweise mit sudo:
 
@@ -250,7 +251,11 @@ Läuft die Datenbank nicht als Debian-Paket, sondern im Docker-Container
 Paketinstallation aus Abschnitt 5.1 auf dem Host. Im Konfigurationsblock
 von `setup_database.sh` sind dann zusätzlich `DB_UEBER_DOCKER="yes"`
 sowie der Containername in `DOCKER_CONTAINER` zu setzen; alle weiteren
-Variablen und der Aufruf bleiben unverändert.
+Variablen und der Aufruf bleiben unverändert. Wurde der Container mit
+`POSTGRES_USER=<anderer Name>` statt des Standards erstellt, zusätzlich
+`DB_ADMIN_USER` auf diesen Namen setzen; das Skript meldet sich
+anderenfalls als Administrator `postgres` an, wodurch der Container die
+Meldung `role "postgres" does not exist` zurückgibt.
 
 Beispiel für den Start des Containers (Port 5432 auf dem Host
 veröffentlicht, Daten im Volume):
@@ -350,7 +355,7 @@ Zugangsdaten vorkommen. Diese Angaben müssen zueinander passen.
 
 | Datei | Stelle | Was ist anzupassen? |
 |---|---|---|
-| `server/setup_database.sh` | Konfigurationsblock am Dateianfang | `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_TABLE`, `DB_HOST`, `DB_PORT`, optional `GRANT_AGGREGATE_READ`; läuft die Datenbank im Docker-Container, zusätzlich `DB_UEBER_DOCKER="yes"` und `DOCKER_CONTAINER`. Dies ist die einzige Stelle, an der die Datenbank konfiguriert wird. `schema.sql` und `aggregations.sql` brauchen keine Bearbeitung: das Skript ersetzt einen abweichenden Tabellennamen automatisch, einschliesslich der abgeleiteten Namen `_1min`, `_1h`, `_1day` (Arbeitskopien, Originale bleiben unverändert). |
+| `server/setup_database.sh` | Konfigurationsblock am Dateianfang | `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_TABLE`, `DB_HOST`, `DB_PORT`, optional `GRANT_AGGREGATE_READ`; läuft die Datenbank im Docker-Container, zusätzlich `DB_UEBER_DOCKER="yes"`, `DOCKER_CONTAINER` und bei abweichendem `POSTGRES_USER` des Containers `DB_ADMIN_USER`. Dies ist die einzige Stelle, an der die Datenbank konfiguriert wird. `schema.sql` und `aggregations.sql` brauchen keine Bearbeitung: das Skript ersetzt einen abweichenden Tabellennamen automatisch, einschliesslich der abgeleiteten Namen `_1min`, `_1h`, `_1day` (Arbeitskopien, Originale bleiben unverändert). |
 | `server/db_writer.py` | `DB_DSN`, Konfigurationsblock am Dateianfang (ca. Zeile 21) | Muss exakt den Werten des Setup-Skripts entsprechen: `host=` → `DB_HOST`, `dbname=` → `DB_NAME`, `user=` → `DB_USER`, `password=` → `DB_PASSWORD`. Das Skript druckt die fertige Zeile am Ende aus. |
 | `server/db_writer.py` | `INSERT_SQL` (ca. Zeilen 26 bis 30) | Nur falls in `setup_database.sh` ein von `measurements` abweichender `DB_TABLE` vergeben wurde: `INSERT INTO measurements` entsprechend ändern, sonst schreibt der db_writer in eine nicht vorhandene Tabelle. |
 | `server/db_writer.py` | `BROKER_USER`, `BROKER_PASS` (ca. Zeilen 18 und 19) | Keine Datenbank-, sondern MQTT-Zugangsdaten des zentralen Mosquitto-Brokers (Abschnitt 5.2, Benutzer `db-subscriber`). |
@@ -451,6 +456,7 @@ für alle Instanzen auf dem Gerät.
 | Keine Werte, "PLC nicht erreichbar" | IP, Rack 0/Slot 1, PUT/GET im TIA Portal freigegeben, DB nicht optimiert |
 | Keine Nachrichten am zentralen Broker | Bridge-Konfiguration, ZENTRAL-IP, Benutzer/Passwort, Windows-Firewall (Port 1883) |
 | Tabelle bleibt leer | db_writer-Log, DB_DSN, Rechte des Datenbankbenutzers |
+| setup_database.sh meldet `role "postgres" does not exist` | Container wurde mit abweichendem `POSTGRES_USER` erstellt. `DB_ADMIN_USER` im Setup-Skript auf diesen Namen setzen (prüfen: `docker exec <Container> env`). Die Folgemeldung "TimescaleDB-Extension ist nicht installiert" gehört meist zu demselben Fehler. |
 | db_writer-Dienst (Docker-Variante) startet nicht | Läuft der Container (`docker ps`)? Containernamen in der `ExecStartPre`-Zeile des Dienstes korrekt (wie `DOCKER_CONTAINER` im Setup-Skript)? Port veröffentlicht (`-p 5432:5432`)? `journalctl -u db-writer` |
 | Lücken in der Tabelle | `max_queued_messages` groß genug? Persistenzverzeichnis beschreibbar? |
 
