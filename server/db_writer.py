@@ -57,7 +57,7 @@ def flush(client):
     if not batch:
         return
     rows = []
-    for nachricht, _ in batch:
+    for nachricht, _, _ in batch:
         for tag, eintrag in nachricht["values"].items():
             rows.append((nachricht["time"], nachricht["message_id"], tag,
                          nachricht["site_id"], eintrag["device_id"],
@@ -65,8 +65,11 @@ def flush(client):
     with conn.cursor() as cur:
         execute_values(cur, INSERT_SQL, rows)
     conn.commit()
-    for _, mid in batch:
-        client.ack(mid)            # manueller Ack: erst nach dem Commit
+    for _, mid, qos in batch:
+        # paho 2.x verlangt mid UND qos. Fehlt qos, wirft der Aufruf eine
+        # Ausnahme, die Bestaetigung geht nie raus und der Broker stellt
+        # dem Abonnenten nach max_inflight_messages (100) nichts mehr zu.
+        client.ack(mid, qos)       # manueller Ack: erst nach dem Commit
     log.info("%d Nachrichten (%d Zeilen) geschrieben", len(batch), len(rows))
     batch.clear()
     letzter_flush = time.monotonic()
@@ -75,7 +78,7 @@ def flush(client):
 def on_message(client, userdata, msg):
     global batch, letzter_flush
     nachricht = json.loads(msg.payload)
-    batch.append((nachricht, msg.mid))
+    batch.append((nachricht, msg.mid, msg.qos))
     if len(batch) >= BATCH_MAX or time.monotonic() - letzter_flush >= BATCH_SEKUNDEN:
         try:
             flush(client)
