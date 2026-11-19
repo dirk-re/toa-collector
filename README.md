@@ -13,8 +13,9 @@ Netzwerkausfall. Die Anleitung liegt zusätzlich unter `anleitung/ANLEITUNG.md`.
 | `client/config.ini` | `C:\s7-client\config.ini` (je Client anpassen) |
 | `client/s7_publisher.py` | `C:\s7-client\s7_publisher.py` |
 | `client/mosquitto_client.conf` | `C:\Program Files\mosquitto\mosquitto.conf` (ersetzt die Standardkonfiguration) |
-| `server/schema.sql` | DB-Gerät, einmalig mit psql ausführen |
-| `server/aggregations.sql` | DB-Gerät, einmalig mit psql ausführen (nach `schema.sql`) |
+| `server/schema.sql` | DB-Gerät, wird vom Setup-Skript eingespielt |
+| `server/aggregations.sql` | DB-Gerät, wird vom Setup-Skript eingespielt (nach `schema.sql`) |
+| `server/setup_database.sh` | DB-Gerät (Debian 13): einmalig ausführen; richtet Datenbank, Benutzer und Rechte ein |
 | `server/mosquitto_zentral.conf` | DB-Gerät: Linux `/etc/mosquitto/mosquitto.conf`, Windows `C:\Program Files\mosquitto\mosquitto.conf` |
 | `server/db_writer.py` | DB-Gerät: Linux `/opt/s7/db_writer.py`, Windows `C:\s7\db_writer.py` |
 | `server/db-writer.service` | Nur Linux: `/etc/systemd/system/db-writer.service` |
@@ -179,28 +180,65 @@ timescaledb-tune --pg-config=/usr/lib/postgresql/17/bin/pg_config
 systemctl restart postgresql
 ```
 
-Dann Datenbank anlegen, Erweiterung aktivieren und das Schema einspielen:
+Anschliessend die Datenbank einrichten.
+
+#### Einrichtung mit dem Setup-Skript (empfohlen)
+
+Das Skript `server/setup_database.sh` erledigt die komplette Einrichtung in
+einem Durchgang: Datenbank anlegen, TimescaleDB-Erweiterung aktivieren,
+`schema.sql` und danach `aggregations.sql` einspielen, Datenbankbenutzer
+samt Passwort anlegen und Rechte erteilen. Abschliessend prüft es den
+Zugang und gibt die fertige `DB_DSN`-Zeile aus, die in `db_writer.py`
+einzutragen ist (Abschnitt 5.3).
+
+Alle Datenbankangaben werden im Konfigurationsblock am Dateianfang des
+Skripts vorgegeben:
+
+| Variable | Bedeutung | Standard im Paket |
+|---|---|---|
+| `DB_NAME` | Name der Datenbank | `sensordaten` |
+| `DB_USER` | Datenbankbenutzer für den db_writer | `writer` |
+| `DB_PASSWORD` | Passwort des Datenbankbenutzers | `GEHEIM` (unbedingt ändern) |
+| `DB_TABLE` | Name der Messtabelle | `measurements` |
+| `DB_HOST` | Adresse, unter der `db_writer.py` die Datenbank erreicht | `127.0.0.1` |
+| `DB_PORT` | PostgreSQL-Port | `5432` |
+| `GRANT_AGGREGATE_READ` | Lesezugriff auf die drei Aggregat-Views (`yes`/`no`) | `yes` |
+
+Aufruf auf dem DB-Gerät als root beziehungsweise mit sudo:
+
+```bash
+sudo bash setup_database.sh
+```
+
+Hinweise zum Skript:
+
+- `schema.sql` und `aggregations.sql` müssen nicht bearbeitet werden.
+  Wird in `DB_TABLE` ein von `measurements` abweichender Tabellenname
+  vergeben, ersetzt das Skript den Namen automatisch in Arbeitskopien
+  beider SQL-Dateien, einschliesslich der abgeleiteten Namen `_1min`,
+  `_1h` und `_1day`. Die Originale bleiben unverändert.
+- Das Skript kann gefahrlos wiederholt werden (idempotent).
+- Wichtig bei abweichendem Tabellennamen: auch das `INSERT_SQL` in
+  `db_writer.py` muss dann angepasst werden (siehe Abschnitt 5.4).
+
+#### Alternativ: manuelle Einrichtung ohne Skript
+
+Entspricht dem, was das Skript ausführt; Namen und Passwörter an die
+eigenen Werte anpassen:
 
 ```bash
 su - postgres
 createdb sensordaten
 psql -d sensordaten -c "CREATE EXTENSION timescaledb;"
 psql -d sensordaten -f schema.sql
-```
-
-Anschliessend Komprimierung, Langzeit-Aggregate und Aufbewahrung einrichten
-(einmalig, Details in Abschnitt 7):
-
-```bash
-psql -d sensordaten -f aggregations.sql
-```
-
-Datenbankbenutzer `writer` anlegen und Rechte auf die Tabelle erteilen:
-
-```bash
+psql -d sensordaten -f aggregations.sql   # einmalig, NACH schema.sql (Details: Abschnitt 7)
 psql -d sensordaten -c "CREATE USER writer WITH PASSWORD 'GEHEIM';"
 psql -d sensordaten -c "GRANT INSERT, SELECT ON measurements TO writer;"
 ```
+
+Bei einem abweichenden Tabellennamen muss in diesem Fall der Name in
+`schema.sql` und `aggregations.sql` manuell ersetzt werden; das
+Setup-Skript nimmt diese Anpassung automatisch vor.
 
 ### 5.2 Zentraler Mosquitto-Broker (Debian 13)
 
@@ -230,8 +268,16 @@ Debian-Paket bereits mit korrekten Rechten an.
 ### 5.3 db_writer
 
 1. `db_writer.py` nach `/opt/s7/` (Linux) bzw. `C:\s7\` (Windows) kopieren.
-2. Im Kopf der Datei die Konfiguration anpassen:
-   `BROKER_USER`, `BROKER_PASS`, `DB_DSN` (Datenbank, Benutzer, Passwort).
+2. Im Konfigurationsblock am Dateianfang die Werte anpassen (Details und
+   Übersicht aller Stellen: Abschnitt 5.4):
+   - `DB_DSN` (ca. Zeile 21): `host=`, `dbname=`, `user=`, `password=`
+     mit den Werten aus `setup_database.sh`. Das Skript druckt die
+     fertige Zeile am Ende aus; sie kann direkt übernommen werden.
+   - `BROKER_USER`, `BROKER_PASS` (ca. Zeilen 18 und 19): MQTT-Zugangsdaten
+     des zentralen Brokers aus Abschnitt 5.2 (Benutzer `db-subscriber`).
+   - Nur bei abweichendem Tabellennamen zusätzlich `INSERT_SQL`
+     (ca. Zeilen 26 bis 30): `INSERT INTO measurements` auf den in
+     `DB_TABLE` vergebenen Namen ändern.
 3. Abhängigkeiten: `pip install paho-mqtt psycopg2-binary`
 4. Als Dienst einrichten:
 
@@ -245,6 +291,23 @@ systemctl enable --now db-writer
 
 Windows: NSSM wie in Abschnitt 4.4, mit Programm `python.exe` und
 AppParameters `C:\s7\db_writer.py`, Dienstname z. B. `S7DbWriter`.
+
+### 5.4 Wo werden Datenbank-Zugangsdaten angepasst?
+
+Übersicht aller Stellen, an denen Datenbanknamen, Tabellenname und
+Zugangsdaten vorkommen. Diese Angaben müssen zueinander passen.
+
+| Datei | Stelle | Was ist anzupassen? |
+|---|---|---|
+| `server/setup_database.sh` | Konfigurationsblock am Dateianfang | `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_TABLE`, `DB_HOST`, `DB_PORT`, optional `GRANT_AGGREGATE_READ`. Dies ist die einzige Stelle, an der die Datenbank konfiguriert wird. `schema.sql` und `aggregations.sql` brauchen keine Bearbeitung: das Skript ersetzt einen abweichenden Tabellennamen automatisch, einschliesslich der abgeleiteten Namen `_1min`, `_1h`, `_1day` (Arbeitskopien, Originale bleiben unverändert). |
+| `server/db_writer.py` | `DB_DSN`, Konfigurationsblock am Dateianfang (ca. Zeile 21) | Muss exakt den Werten des Setup-Skripts entsprechen: `host=` → `DB_HOST`, `dbname=` → `DB_NAME`, `user=` → `DB_USER`, `password=` → `DB_PASSWORD`. Das Skript druckt die fertige Zeile am Ende aus. |
+| `server/db_writer.py` | `INSERT_SQL` (ca. Zeilen 26 bis 30) | Nur falls in `setup_database.sh` ein von `measurements` abweichender `DB_TABLE` vergeben wurde: `INSERT INTO measurements` entsprechend ändern, sonst schreibt der db_writer in eine nicht vorhandene Tabelle. |
+| `server/db_writer.py` | `BROKER_USER`, `BROKER_PASS` (ca. Zeilen 18 und 19) | Keine Datenbank-, sondern MQTT-Zugangsdaten des zentralen Mosquitto-Brokers (Abschnitt 5.2, Benutzer `db-subscriber`). |
+| `client/s7_publisher.py` | keine | Enthält keinerlei Datenbank-Zugangsdaten. Die MQTT-Zugangsdaten in `client/config.ini`, Abschnitt `[mqtt]`, betreffen den lokalen Client-Broker, nicht die Datenbank. |
+
+Wurde der Standard-Tabellenname `measurements` beibehalten, ist ausser dem
+Konfigurationsblock des Setup-Skripts und der `DB_DSN`-Zeile im
+`db_writer.py` nichts anzupassen.
 
 ## 6. Inbetriebnahme in dieser Reihenfolge
 
