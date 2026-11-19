@@ -18,7 +18,8 @@ Netzwerkausfall.
 | `server/setup_database.sh` | DB-Gerät (Debian 13): einmalig ausführen; richtet Datenbank, Benutzer und Rechte ein |
 | `server/mosquitto_zentral.conf` | DB-Gerät: Linux `/etc/mosquitto/mosquitto.conf`, Windows `C:\Program Files\mosquitto\mosquitto.conf` |
 | `server/db_writer.py` | DB-Gerät: Linux `/opt/s7/db_writer.py`, Windows `C:\s7\db_writer.py` |
-| `server/db-writer.service` | Nur Linux: `/etc/systemd/system/db-writer.service` |
+| `server/db-writer.service` | Nur Linux: `/etc/systemd/system/db-writer.service` (native PostgreSQL-Variante) |
+| `server/db-writer-docker.service` | Nur Linux, nur bei TimescaleDB im Docker-Container: statt `db-writer.service` als `/etc/systemd/system/db-writer.service` installieren |
 
 ## 2. Architektur
 
@@ -277,6 +278,10 @@ Hinweise zum Docker-Betrieb:
   zurück und prüft die Zugangsdaten, aber nicht die Portweiterleitung.
 - Aufruf unverändert: `sudo bash setup_database.sh` (im Docker-Modus
   genügt die Mitgliedschaft in der Gruppe `docker`).
+- Für den db_writer als systemd-Dienst die Variante
+  `server/db-writer-docker.service` verwenden (Abschnitt 5.3): sie
+  wartet vor dem Start, bis der Container läuft und PostgreSQL im
+  Container Verbindungen annimmt.
 - Das Skript bleibt idempotent und kann wie gehabt wiederholt werden.
 
 ### 5.2 Zentraler Mosquitto-Broker (Debian 13)
@@ -320,13 +325,20 @@ Debian-Paket bereits mit korrekten Rechten an.
 3. Abhängigkeiten: `pip install paho-mqtt psycopg2-binary`
 4. Als Dienst einrichten:
 
-Linux (systemd): `db-writer.service` nach
-`/etc/systemd/system/` kopieren, dann:
+Linux (systemd), native PostgreSQL-Installation: `db-writer.service` nach
+`/etc/systemd/system/db-writer.service` kopieren, dann:
 
 ```bash
 systemctl daemon-reload
 systemctl enable --now db-writer
 ```
+
+Läuft TimescaleDB im Docker-Container, stattdessen die Variante
+`db-writer-docker.service` als `/etc/systemd/system/db-writer.service`
+installieren; es darf nur eine der beiden Service-Dateien installiert
+sein. Die Kommandos bleiben identisch. Der Dienst wartet vor dem Start,
+bis der Container läuft und PostgreSQL im Container Verbindungen
+annimmt (Details: Abschnitt 5.1, Betrieb im Docker-Container).
 
 Windows: NSSM wie in Abschnitt 4.4, mit Programm `python.exe` und
 AppParameters `C:\s7\db_writer.py`, Dienstname z. B. `S7DbWriter`.
@@ -439,6 +451,7 @@ für alle Instanzen auf dem Gerät.
 | Keine Werte, "PLC nicht erreichbar" | IP, Rack 0/Slot 1, PUT/GET im TIA Portal freigegeben, DB nicht optimiert |
 | Keine Nachrichten am zentralen Broker | Bridge-Konfiguration, ZENTRAL-IP, Benutzer/Passwort, Windows-Firewall (Port 1883) |
 | Tabelle bleibt leer | db_writer-Log, DB_DSN, Rechte des Datenbankbenutzers |
+| db_writer-Dienst (Docker-Variante) startet nicht | Läuft der Container (`docker ps`)? Containernamen in der `ExecStartPre`-Zeile des Dienstes korrekt (wie `DOCKER_CONTAINER` im Setup-Skript)? Port veröffentlicht (`-p 5432:5432`)? `journalctl -u db-writer` |
 | Lücken in der Tabelle | `max_queued_messages` groß genug? Persistenzverzeichnis beschreibbar? |
 
 ## 10. Hinweise für den Betrieb
